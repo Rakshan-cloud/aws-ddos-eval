@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Never commit credentials
+.env
+credentials
+*.pem
+
+# Raw run data is large; archive separately
+data/raw/**
+!data/raw/.gitkeep
