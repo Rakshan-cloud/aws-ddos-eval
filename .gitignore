@@ -19,3 +19,14 @@ credentials
 # Raw run data is large; archive separately
 data/raw/**
 !data/raw/.gitkeep
+
+# Local-only research notes and working files.
+# Reports, talk scripts, decision records and the plan workbook stay on the
+# researcher's machine; the repository carries the artefact code only.
+docs/
+data/processed/
+data/raw/*
+!data/raw/.gitkeep
+
+# Terraform build artefacts
+**/.build/
