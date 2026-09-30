@@ -1,0 +1,84 @@
+# Traffic scenario definitions.
+#
+# FROZEN at the Week 5 pilot. After that, any change here invalidates every
+# completed run, because the scenario shape IS the independent variable.
+#
+# The design logic, in one line: the rate threshold sits in the gap between
+# the scenarios, so each one can only trip one blocking mechanism.
+#
+#   legitimate client    1 req/s =  60 per 60s window  -> below 100, never blocked on rate
+#   S4 attacker          1 req/s =  60 per 60s window  -> below 100, isolates CONTENT
+#   S3 attacker          5 req/s = 300 per 60s window  -> above 100, isolates RATE
+#   S2 attacker         10 req/s = 600 per 60s window  -> above 100, isolates RATE
+#
+# S2 and S3 carry benign payloads that match no signature, so any block there
+# is attributable to rate alone. S4 stays below the threshold, so any block
+# there is attributable to content alone. See docs/design-freeze.md.
+
+meta:
+  window_seconds: 600
+  warmup_seconds: 30        # discarded: Lambda cold start, TLS setup, connection pool fill
+  cooldown_seconds: 600     # >= 10 min so rate-based counters decay fully before the next run
+  peak_rate_ceiling: 11     # HARD LIMIT, asserted by the runner before every run.
+                            # Documented in docs/aws-aup-compliance.md. Raising this
+                            # invalidates the AWS acceptable-use position and the
+                            # ethics declaration.
+
+# The legitimate client is identical in every scenario. That is deliberate:
+# M2 and M4 are measured under the same legitimate load in all 20 cells, so
+# differences between cells are attributable to the configuration, not to a
+# change in what the legitimate client was doing.
+legitimate:
+  rate: 1.0
+  payload: benign
+  duration_seconds: 600
+
+scenarios:
+  S1:
+    name: Normal
+    description: >-
+      Steady legitimate traffic only. Establishes the per-configuration latency
+      and error floor. No control under study should act.
+    attacker:
+      enabled: false
+
+  S2:
+    name: Burst
+    description: >-
+      Idle lead-in, then a burst above the rate threshold, then idle again.
+      Shaped to measure rate-limiting ONSET and RELEASE latency, which AWS
+      documents only loosely ("up to several minutes" and "usually below 30
+      seconds"). Week 3 calibration measured 26s onset and 65s release.
+    attacker:
+      enabled: true
+      payload: benign
+      phases:
+        - { rate: 0.0,  duration_seconds: 120 }   # lead-in: baseline before the burst
+        - { rate: 10.0, duration_seconds: 180 }   # 600 per window, above threshold
+        - { rate: 0.0,  duration_seconds: 300 }   # tail: measures release
+
+  S3:
+    name: Repeated-source sustained
+    description: >-
+      Continuous above-threshold traffic from one source for the whole window.
+      Measures steady-state rate limiting and per-IP aggregation, as distinct
+      from S2's transient behaviour.
+    attacker:
+      enabled: true
+      payload: benign
+      phases:
+        - { rate: 5.0, duration_seconds: 600 }    # 300 per window, above threshold
+
+  S4:
+    name: Signature-bearing
+    description: >-
+      Attack-shaped payloads at a rate deliberately BELOW the threshold, so
+      that any block is attributable to content matching rather than rate.
+      Payload classes rotate round-robin; each targets a named AWS managed
+      rule and carries a documented label, so the analysis can report which
+      rule fired rather than only that something was blocked.
+    attacker:
+      enabled: true
+      payload: s4_rotating
+      phases:
+        - { rate: 1.0, duration_seconds: 600 }    # 60 per window, below threshold
