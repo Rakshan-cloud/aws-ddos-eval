@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -31,15 +32,40 @@ RAW = REPO / "data" / "raw"
 
 
 def git_sha() -> str:
-    r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
-                       capture_output=True, text=True)
-    return r.stdout.strip() or "unknown"
+    """Code version for the manifest.
+
+    The generator hosts have neither git nor the repository, so the
+    orchestrator passes the value through the environment. Falling back to a
+    subprocess keeps local dry runs working.
+    """
+    env = os.environ.get("DDOS_EVAL_GIT_SHA")
+    if env:
+        return env
+    try:
+        r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True)
+        return r.stdout.strip() or "unknown"
+    except FileNotFoundError:
+        return "unknown"
 
 
 def tf_output(layer: str, key: str, default=None):
-    r = subprocess.run(["terraform", f"-chdir={REPO}/infra/{layer}", "output", "-raw", key],
-                       capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else default
+    """Read a Terraform output, or take it from the environment.
+
+    Terraform is not installed on the generator hosts, so the orchestrator
+    injects the source addresses it already resolved. Those addresses are the
+    evidence that the two sources were distinct, so they must reach the
+    manifest one way or the other.
+    """
+    env = os.environ.get(f"DDOS_EVAL_{key.upper()}")
+    if env:
+        return env
+    try:
+        r = subprocess.run(["terraform", f"-chdir={REPO}/infra/{layer}", "output", "-raw", key],
+                           capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else default
+    except FileNotFoundError:
+        return default
 
 
 def active_config() -> dict:
@@ -58,9 +84,9 @@ def rule_group_versions(cfg: str) -> dict:
     layer = {"C3": "20-waf-managed", "C4": "30-waf-rate", "C5": "35-waf-antiddos"}.get(cfg)
     if not layer:
         return {}
-    arn = tf_output(layer, "web_acl_arn")
+    arn = tf_output(layer, "web_acl_arn") or os.environ.get("DDOS_EVAL_WEB_ACL_ARN")
     if not arn:
-        return {}
+        return {"note": "web ACL details injected by the orchestrator, not read on-host"}
     try:
         import boto3
         waf = boto3.Session(profile_name="ddos-eval").client("wafv2", region_name="us-east-1")
@@ -77,7 +103,8 @@ def rule_group_versions(cfg: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: str | None):
+async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: str | None,
+                  role: str = "both", start_at: float | None = None):
     spec = yaml.safe_load(SCENARIOS.read_text())
     meta, legit_spec = spec["meta"], spec["legitimate"]
     scen = spec["scenarios"][scenario_id]
@@ -107,6 +134,18 @@ async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: st
     legit = Generator(cfg["endpoint"], "legit")
     attacker = Generator(cfg["endpoint"], "attacker")
 
+    # --- role ------------------------------------------------------------
+    # Each generator host runs ONLY its own half. Running both halves in one
+    # process would give them the same source address, and AWS WAF rate-based
+    # rules aggregate per address -- so the attacker's blocking would fall on
+    # the legitimate client too and M2 would be zero by construction. That is
+    # the exact failure decision D3 exists to prevent.
+    run_legit = role in ("both", "legit")
+    run_attacker = role in ("both", "attacker") and scen["attacker"]["enabled"]
+    print(f"  role       : {role}"
+          + ("   <-- both halves share one source address; "
+             "valid only for dry runs" if role == "both" else ""))
+
     # --- payload delivery assertion (ADR 0002, ADR 0003) -------------------
     problems = attacker.verify_delivery()
     if problems:
@@ -126,16 +165,38 @@ async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: st
                aiohttp.ClientSession(timeout=timeout) as s_att:
 
         print(f"  warm-up    : {warmup}s (discarded)")
-        await asyncio.gather(legit.warmup(s_legit, warmup), attacker.warmup(s_att, warmup))
+        warm = []
+        if run_legit:
+            warm.append(legit.warmup(s_legit, warmup))
+        if run_attacker:
+            warm.append(attacker.warmup(s_att, warmup))
+        await asyncio.gather(*warm)
         legit.records.clear()
         attacker.records.clear()
+
+        # --- synchronised start ------------------------------------------
+        # When the two halves run on separate hosts they must measure the SAME
+        # window, or the attacker's burst would land outside the legitimate
+        # client's observation period and M2 would describe a quiet moment.
+        if start_at:
+            wait = start_at - time.time()
+            if wait > 0:
+                print(f"  sync wait  : {wait:.1f}s until the agreed start")
+                await asyncio.sleep(wait)
+            elif wait < -5:
+                raise SystemExit(
+                    f"ABORT: agreed start was {-wait:.0f}s ago. The two hosts would "
+                    f"measure different windows.")
 
         t0_mono, t0_wall = time.monotonic(), time.time()
         print(f"  running    : {time.strftime('%H:%M:%S')}")
 
-        tasks = [legit.run_phase(s_legit, legit_spec["rate"], window,
-                                 legit_spec["payload"], "window", t0_mono, t0_wall)]
-        if scen["attacker"]["enabled"]:
+        tasks = []
+        if run_legit:
+            tasks.append(legit.run_phase(s_legit, legit_spec["rate"], window,
+                                         legit_spec["payload"], "window",
+                                         t0_mono, t0_wall))
+        if run_attacker:
             async def attacker_phases():
                 for i, ph in enumerate(scen["attacker"]["phases"]):
                     d = ph["duration_seconds"] if not dry_run else max(5, window // 3)
@@ -151,7 +212,7 @@ async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: st
     # --- achieved rate, reported not assumed -------------------------------
     n_legit = len(legit.records)
     achieved = n_legit / elapsed if elapsed else 0
-    drift = abs(achieved - legit_spec["rate"]) / legit_spec["rate"] * 100
+    drift = abs(achieved - legit_spec["rate"]) / legit_spec["rate"] * 100 if run_legit else 0
 
     manifest = {
         "run_id": run_id,
@@ -178,12 +239,14 @@ async def execute(scenario_id: str, rep: int, dry_run: bool, source_override: st
             "legit": tf_output("40-harness", "legit_public_ip", source_override or "local"),
         },
         "generator_host": source_override or "local",
+        "role": role,
         "waf": rule_group_versions(cfg["configuration"]),
     }
 
     RAW.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(t0_wall))
-    base = RAW / f"{run_id}-{stamp}"
+    suffix = "" if role == "both" else f"-{role}"
+    base = RAW / f"{run_id}{suffix}-{stamp}"
     base.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2))
     with base.with_suffix(".records.jsonl").open("w") as f:
         for r in recs:
@@ -213,8 +276,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="30s window instead of 600s, for validating the pipeline")
     ap.add_argument("--host", default=None, help="label for the generator host")
+    ap.add_argument("--role", default="both", choices=["both", "legit", "attacker"],
+                    help="which half this host runs. 'both' shares one source "
+                         "address and is valid only for dry runs.")
+    ap.add_argument("--start-at", type=float, default=None,
+                    help="unix epoch at which to begin the measurement window, "
+                         "so separate hosts measure the same window")
     a = ap.parse_args()
-    asyncio.run(execute(a.scenario, a.rep, a.dry_run, a.host))
+    asyncio.run(execute(a.scenario, a.rep, a.dry_run, a.host, a.role, a.start_at))
 
 
 if __name__ == "__main__":

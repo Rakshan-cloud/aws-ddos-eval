@@ -76,8 +76,27 @@ variable "use_elastic_ips" {
   default     = false
 }
 
-# Resolved at apply time rather than pinned. A hardcoded AMI id silently goes
-# stale and would make the artefact unreproducible once AWS deregisters it.
+variable "pinned_ami_id" {
+  description = <<-EOT
+    PIN THIS before the experiment runs.
+
+    Discovered the hard way during the Week 5 pilot: with most_recent = true,
+    AWS publishing a new Amazon Linux image causes the next `terraform apply`
+    to REPLACE both instances. That destroyed a completed pilot run's records,
+    and mid-experiment it would also have changed the operating system image
+    between runs, quietly breaking comparability across the 60-run matrix.
+
+    Empty string resolves the latest image, which is correct for first build.
+    Once the experiment begins, set this to the resolved id so applies are
+    non-destructive and every run executes on an identical image.
+
+    Resolved id as at 2026-10-05: ami-043de3c7713de1480
+  EOT
+  type        = string
+  default     = "ami-043de3c7713de1480"
+}
+
+# Used only when pinned_ami_id is empty, i.e. on a first build.
 data "aws_ami" "al2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -174,7 +193,7 @@ locals {
 resource "aws_instance" "gen" {
   for_each = local.hosts
 
-  ami                    = data.aws_ami.al2023.id
+  ami                    = var.pinned_ami_id != "" ? var.pinned_ami_id : data.aws_ami.al2023.id
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnets.default.ids[0]
   vpc_security_group_ids = [aws_security_group.gen.id]
@@ -229,10 +248,75 @@ output "instance_type" {
 }
 
 output "ami_id" {
-  description = "Resolved at apply time. Recorded per run so the environment is reproducible."
-  value       = data.aws_ami.al2023.id
+  description = "The image actually in use. Recorded per run so the environment is reproducible."
+  value       = var.pinned_ami_id != "" ? var.pinned_ami_id : data.aws_ami.al2023.id
+}
+
+output "ami_pinned" {
+  description = "False means a new AWS image release could replace the instances on the next apply."
+  value       = var.pinned_ami_id != ""
+}
+
+# Instances hold irreplaceable run data between a run finishing and its upload.
+# Refuse to destroy them by accident.
+resource "null_resource" "replacement_guard" {
+  triggers = {
+    ami = var.pinned_ami_id != "" ? var.pinned_ami_id : data.aws_ami.al2023.id
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 output "using_elastic_ips" {
   value = var.use_elastic_ips
+}
+
+# ---------------------------------------------------------------- results ---
+# Run records are ~700 KB per run, well past the ~24 KB that SSM returns
+# inline in a command result. Retrieval therefore goes via S3, which also
+# gives the raw data durable storage independent of the instances -- the
+# instances are stopped and could be rebuilt, the data cannot be regenerated.
+
+resource "aws_s3_bucket" "results" {
+  bucket        = "${var.name_prefix}-results-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_s3_bucket_public_access_block" "results" {
+  bucket                  = aws_s3_bucket.results.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "results" {
+  bucket = aws_s3_bucket.results.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# The generator hosts write their own run output and nothing else.
+data "aws_iam_policy_document" "results_write" {
+  statement {
+    actions   = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
+    resources = [aws_s3_bucket.results.arn, "${aws_s3_bucket.results.arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "results_write" {
+  name   = "${var.name_prefix}-results-write"
+  role   = aws_iam_role.gen.id
+  policy = data.aws_iam_policy_document.results_write.json
+}
+
+output "results_bucket" {
+  description = "Where generator hosts upload run records, and where the orchestrator reads them from."
+  value       = aws_s3_bucket.results.bucket
 }

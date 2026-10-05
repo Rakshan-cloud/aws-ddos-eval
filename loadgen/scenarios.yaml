@@ -55,7 +55,12 @@ scenarios:
       phases:
         - { rate: 0.0,  duration_seconds: 120 }   # lead-in: baseline before the burst
         - { rate: 10.0, duration_seconds: 180 }   # 600 per window, above threshold
-        - { rate: 0.0,  duration_seconds: 300 }   # tail: measures release
+        # Tail at 1 req/s, NOT zero. A stream that stops sending cannot
+        # observe its own un-blocking: the pilot showed the attacker's last
+        # 403 landing exactly at the burst boundary simply because it went
+        # silent there. 1 req/s is below the threshold, so the attacker stays
+        # blocked only until AWS releases it -- which is the measurement.
+        - { rate: 1.0,  duration_seconds: 300 }
 
   S3:
     name: Repeated-source sustained
