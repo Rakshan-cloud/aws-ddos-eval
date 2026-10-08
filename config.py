@@ -61,6 +61,25 @@ def _load_dotenv(path: Path) -> None:
 _load_dotenv(REPO / ".env")
 
 
+# --- credentials -----------------------------------------------------------
+#
+# Two supported sources, checked in this order:
+#
+#   1. Explicit keys in .env   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#   2. A named profile         AWS_PROFILE -> ~/.aws/credentials
+#
+# .env sits INSIDE the repository, so option 1 is protected only by
+# .gitignore. A pre-commit hook (./scripts/install-hooks.sh) refuses any
+# commit containing .env or an AWS key pattern, so that protection is
+# enforced rather than merely intended. Install it once after cloning.
+
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "")
+
+USING_EXPLICIT_KEYS = bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
+
+
 # --- whose account, and where ----------------------------------------------
 
 AWS_PROFILE = os.environ.get("AWS_PROFILE", "ddos-eval")
@@ -113,11 +132,45 @@ def session():
     across the codebase.
     """
     import boto3
+    if USING_EXPLICIT_KEYS:
+        return boto3.Session(
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            aws_session_token=AWS_SESSION_TOKEN or None,
+            region_name=AWS_REGION,
+        )
     return boto3.Session(profile_name=AWS_PROFILE)
 
 
+def terraform_env() -> dict:
+    """Environment for Terraform subprocesses.
+
+    Terraform resolves AWS credentials itself and never reads .env, so
+    whichever source is configured has to be passed through explicitly.
+    """
+    env = dict(os.environ)
+    if USING_EXPLICIT_KEYS:
+        # Explicit keys win. A stale AWS_PROFILE left in the environment would
+        # otherwise shadow them and Terraform would act on the wrong account.
+        env.pop("AWS_PROFILE", None)
+        env["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
+        env["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+        if AWS_SESSION_TOKEN:
+            env["AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
+    else:
+        env["AWS_PROFILE"] = AWS_PROFILE
+    env.setdefault("AWS_REGION", AWS_REGION)
+    return env
+
+
 def summary() -> str:
-    return (f"profile={AWS_PROFILE}  region={AWS_REGION}  "
+    # Never prints the secret. Four characters either side of the key id is
+    # enough to confirm which credential is loaded without exposing it.
+    if USING_EXPLICIT_KEYS:
+        src = f"keys from .env ({AWS_ACCESS_KEY_ID[:4]}...{AWS_ACCESS_KEY_ID[-4:]})"
+    else:
+        src = f"profile {AWS_PROFILE}"
+    return (f"credentials={src}  region={AWS_REGION}  "
             f"global={AWS_GLOBAL_REGION}  prefix={NAME_PREFIX}")
 
 

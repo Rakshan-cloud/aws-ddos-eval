@@ -87,11 +87,28 @@ cd aws-ddos-eval
 python3.12 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 
-cp .env.example .env          # then edit it
-aws configure --profile ddos-eval
+cp .env.example .env
+./scripts/install-hooks.sh    # IMPORTANT - installs the credential guard
 
+aws configure --profile ddos-eval
 ./.venv/bin/python config.py  # prints the resolved configuration
 ```
+
+### Credentials
+
+Two supported sources, checked in this order:
+
+1. **Explicit keys in `.env`** — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+   To copy them across from an existing profile without exposing them:
+   `./.venv/bin/python scripts/env_from_profile.py`
+2. **A named profile** — leave the keys blank and set `AWS_PROFILE`.
+
+`.env` lives inside the repository, so option 1 is protected only by
+`.gitignore` — which is advisory, since `git add -f` defeats it. **Run
+`./scripts/install-hooks.sh` once.** It installs a pre-commit hook that
+inspects what is actually staged and refuses any commit containing a `.env`
+file, an AWS key pattern, Terraform state or a `.pem`. Verified blocking both
+cases.
 
 `.env` holds only what differs between people and accounts: the AWS profile
 name, region, resource prefix and budget alert address. Credentials stay in

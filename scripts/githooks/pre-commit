@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Refuses any commit that would publish credentials.
+#
+# .env is gitignored, but .gitignore is advisory: `git add -f`, an edited
+# ignore file, or a rename all defeat it. This hook checks what is actually
+# STAGED, so the protection holds regardless.
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+fail() { echo "COMMIT BLOCKED: $1" >&2; exit 1; }
+
+# 1. The .env file itself, under any path.
+for f in $staged; do
+  case "$(basename "$f")" in
+    .env|.env.local|.env.*)
+      [ "$(basename "$f")" = ".env.example" ] && continue
+      fail "$f holds credentials and must never be committed."
+      ;;
+    credentials|*.pem|rootkey.csv)
+      fail "$f looks like a credential file."
+      ;;
+  esac
+done
+
+# 2. AWS key patterns in staged content, wherever they appear.
+if git diff --cached -U0 | grep -qE '^\+.*\b(AKIA|ASIA)[0-9A-Z]{16}\b'; then
+  fail "a staged line contains an AWS access key id."
+fi
+# Match a secret VALUE, not code that merely names the variable.
+# An AWS secret key is exactly 40 characters of base64 alphabet, so requiring
+# that shape avoids flagging legitimate lines such as
+#   AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+# which name the variable without containing a secret.
+if git diff --cached -U0 | grep -qE '^\+.*(AWS_)?SECRET_ACCESS_KEY[[:space:]]*[=:][[:space:]]*"?[A-Za-z0-9/+=]{40}"?'; then
+  fail "a staged line contains what looks like an AWS secret access key."
+fi
+
+# 3. Terraform state, which embeds resource detail and sometimes secrets.
+for f in $staged; do
+  case "$f" in
+    *.tfstate|*.tfstate.*) fail "$f is Terraform state." ;;
+  esac
+done
+
+exit 0
