@@ -28,6 +28,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 REMOTE = "/opt/ddos-eval"
 
@@ -86,8 +91,8 @@ def main():
                     help="headroom for deployment and warm-up before the agreed start")
     a = ap.parse_args()
 
-    session = boto3.Session(profile_name="ddos-eval")
-    ssm = session.client("ssm", region_name="eu-west-1")
+    session = config.session()
+    ssm = session.client("ssm", region_name=config.AWS_REGION)
 
     hosts = {
         "attacker": tf_output("40-harness", "attacker_instance_id"),
@@ -182,7 +187,7 @@ def main():
     print("  downloading from S3...")
     RAW = REPO / "data" / "raw"
     RAW.mkdir(parents=True, exist_ok=True)
-    s3 = session.client("s3", region_name="eu-west-1")
+    s3 = session.client("s3", region_name=config.AWS_REGION)
     got = 0
     for obj in s3.list_objects_v2(Bucket=bucket, Prefix="raw/").get("Contents", []):
         name = obj["Key"].split("/")[-1]

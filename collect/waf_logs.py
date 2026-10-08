@@ -22,6 +22,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 
 LOG_GROUPS = {
@@ -36,7 +41,7 @@ def fetch_logs(cfg: str, start: dt.datetime, end: dt.datetime) -> list[dict]:
     if not group:
         return []  # C1 and C2 have no web ACL, so no WAF logs exist
 
-    logs = boto3.Session(profile_name="ddos-eval").client("logs", region_name="us-east-1")
+    logs = config.session().client("logs", region_name=config.AWS_GLOBAL_REGION)
     kwargs = {
         "logGroupName": group,
         "startTime": int(start.timestamp() * 1000),

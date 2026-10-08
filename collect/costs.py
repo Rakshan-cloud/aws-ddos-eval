@@ -25,11 +25,16 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "data" / "processed"
 
 # Pricing API is served only from these regions.
-PRICING_REGION = "us-east-1"
+PRICING_REGION = config.AWS_GLOBAL_REGION
 
 # What each configuration deploys. Quantities, never prices.
 CONFIG_COMPONENTS = {
@@ -172,7 +177,7 @@ def main():
     ap.add_argument("--since", default=None, help="YYYY-MM-DD for actual spend")
     a = ap.parse_args()
 
-    session = boto3.Session(profile_name="ddos-eval")
+    session = config.session()
     today = dt.date.today()
     since = a.since or (today - dt.timedelta(days=30)).isoformat()
 

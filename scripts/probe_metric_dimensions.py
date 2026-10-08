@@ -21,6 +21,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 manifest = json.loads(Path(sys.argv[1]).read_text())
 
@@ -38,7 +43,7 @@ def tf(layer, key):
 
 acl = tf("30-waf-rate", "web_acl_name")
 dist = tf("10-cloudfront", "distribution_id")
-session = boto3.Session(profile_name="ddos-eval")
+session = config.session()
 
 CANDIDATES = [
     ("AWS/WAFV2", "BlockedRequests", "us-east-1", [{"Name": "WebACL", "Value": acl}]),
@@ -50,15 +55,15 @@ CANDIDATES = [
     ("AWS/WAFV2", "BlockedRequests", "us-east-1",
      [{"Name": "WebACL", "Value": acl}, {"Name": "Rule", "Value": "RateLimitPerIP"}]),
     ("AWS/WAFV2", "AllowedRequests", "us-east-1", [{"Name": "WebACL", "Value": acl}]),
-    ("AWS/ApiGateway", "Count", "eu-west-1", [{"Name": "ApiName", "Value": "ddos-eval-api"}]),
+    ("AWS/ApiGateway", "Count", "eu-west-1", [{"Name": "ApiName", "Value": config.API_NAME}]),
     ("AWS/ApiGateway", "Count", "eu-west-1",
-     [{"Name": "ApiName", "Value": "ddos-eval-api"}, {"Name": "Stage", "Value": "exp"}]),
+     [{"Name": "ApiName", "Value": config.API_NAME}, {"Name": "Stage", "Value": config.API_STAGE}]),
     ("AWS/ApiGateway", "Latency", "eu-west-1",
-     [{"Name": "ApiName", "Value": "ddos-eval-api"}, {"Name": "Stage", "Value": "exp"}]),
+     [{"Name": "ApiName", "Value": config.API_NAME}, {"Name": "Stage", "Value": config.API_STAGE}]),
     ("AWS/Lambda", "Invocations", "eu-west-1",
-     [{"Name": "FunctionName", "Value": "ddos-eval-target"}]),
+     [{"Name": "FunctionName", "Value": config.LAMBDA_FUNCTION}]),
     ("AWS/Lambda", "Duration", "eu-west-1",
-     [{"Name": "FunctionName", "Value": "ddos-eval-target"}]),
+     [{"Name": "FunctionName", "Value": config.LAMBDA_FUNCTION}]),
     ("AWS/CloudFront", "Requests", "us-east-1",
      [{"Name": "DistributionId", "Value": dist}, {"Name": "Region", "Value": "Global"}]),
     ("AWS/CloudFront", "Requests", "us-east-1", [{"Name": "DistributionId", "Value": dist}]),

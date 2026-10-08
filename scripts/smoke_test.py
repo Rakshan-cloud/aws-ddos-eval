@@ -22,6 +22,11 @@ from pathlib import Path
 import boto3
 import httpx
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "data" / "processed"
 
@@ -149,7 +154,7 @@ def main():
     # -- 3. throttle limits in force (T017) ----------------------------------
     print("\nAPI Gateway throttle limits in force (T017)")
     print("-" * 78)
-    s = boto3.Session(profile_name="ddos-eval")
+    s = config.session()
     apigw = s.client("apigateway")
     acct = apigw.get_account()
     st = apigw.get_stage(restApiId=rest_api_id, stageName=stage)

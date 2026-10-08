@@ -17,14 +17,19 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 LOG_GROUPS = {
     "C3 managed rules": "aws-waf-logs-ddos-eval-managed",
     "C4 rate-based": "aws-waf-logs-ddos-eval-rate",
 }
 
-s = boto3.Session(profile_name="ddos-eval")
-logs = s.client("logs", region_name="us-east-1")
+s = config.session()
+logs = s.client("logs", region_name=config.AWS_GLOBAL_REGION)
 since = int((time.time() - 3600) * 1000)
 
 for label, group in LOG_GROUPS.items():

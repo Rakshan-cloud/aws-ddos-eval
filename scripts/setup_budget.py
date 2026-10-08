@@ -4,8 +4,8 @@
 Creates a monthly cost budget with alerts at 50%, 80% and 100% of actual spend,
 plus a forecast alert at 100%. Idempotent: re-running updates the existing budget.
 
-    ./.venv/bin/python scripts/setup_budget.py --profile ddos-eval \
-        --amount 50 --email you@example.com
+    ./.venv/bin/python scripts/setup_budget.py
+        (amount and email come from .env unless overridden)
 """
 import argparse
 import sys
@@ -13,7 +13,12 @@ import sys
 import boto3
 from botocore.exceptions import ClientError
 
-BUDGET_NAME = "ddos-eval-monthly"
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
+BUDGET_NAME = f"{config.NAME_PREFIX}-monthly"
 
 
 def notification(threshold, ntype="ACTUAL"):
@@ -27,14 +32,18 @@ def notification(threshold, ntype="ACTUAL"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--profile", default="ddos-eval")
-    ap.add_argument("--amount", type=float, required=True, help="monthly ceiling in USD")
-    ap.add_argument("--email", required=True, help="where alerts are sent")
+    ap.add_argument("--amount", type=float, default=config.BUDGET_AMOUNT_USD,
+                    help="monthly ceiling in USD; defaults to BUDGET_AMOUNT_USD in .env")
+    ap.add_argument("--email", default=config.BUDGET_EMAIL,
+                    help="where alerts are sent; defaults to BUDGET_EMAIL in .env")
     a = ap.parse_args()
 
-    session = boto3.Session(profile_name=a.profile)
+    if not a.email:
+        sys.exit("No alert address. Set BUDGET_EMAIL in .env or pass --email.")
+
+    session = config.session()
     account = session.client("sts").get_caller_identity()["Account"]
-    budgets = session.client("budgets", region_name="us-east-1")
+    budgets = session.client("budgets", region_name=config.AWS_GLOBAL_REGION)
 
     budget = {
         "BudgetName": BUDGET_NAME,

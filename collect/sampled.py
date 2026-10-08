@@ -20,6 +20,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 LAYER = {"C3": "20-waf-managed", "C4": "30-waf-rate", "C5": "35-waf-antiddos"}
 
@@ -61,7 +66,7 @@ def main():
                   "C5": "ddosEvalAntiDDoS"}[cfg]
     rule = a.rule or acl_metric
 
-    waf = boto3.Session(profile_name="ddos-eval").client("wafv2", region_name="us-east-1")
+    waf = config.session().client("wafv2", region_name=config.AWS_GLOBAL_REGION)
     try:
         r = waf.get_sampled_requests(
             WebAclArn=arn, RuleMetricName=rule, Scope="CLOUDFRONT",

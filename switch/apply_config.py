@@ -26,6 +26,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 PROFILE = os.environ.get("AWS_PROFILE", "ddos-eval")
 
@@ -133,7 +138,7 @@ def main():
     ap.add_argument("--show", action="store_true", help="report what is currently deployed")
     a = ap.parse_args()
 
-    session = boto3.Session(profile_name=PROFILE)
+    session = config.session()
 
     if a.show or not a.config:
         show(session)

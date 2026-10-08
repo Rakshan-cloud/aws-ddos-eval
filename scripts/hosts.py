@@ -21,6 +21,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -51,8 +56,8 @@ def main():
     ap.add_argument("action", choices=["status", "start", "stop"])
     a = ap.parse_args()
 
-    session = boto3.Session(profile_name="ddos-eval")
-    ec2 = session.client("ec2", region_name="eu-west-1")
+    session = config.session()
+    ec2 = session.client("ec2", region_name=config.AWS_REGION)
     inst = ids()
 
     if a.action in ("start", "stop"):

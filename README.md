@@ -78,13 +78,41 @@ docs/                   Design, decisions, ethics, verified AWS facts, thesis
 
 ---
 
-## Setup
+## Setup — clone and run
 
 ```bash
+git clone git@github.com:Rakshan-cloud/aws-ddos-eval.git
+cd aws-ddos-eval
+
 python3.12 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
-aws configure --profile ddos-eval      # never commit credentials
-export AWS_PROFILE=ddos-eval
+
+cp .env.example .env          # then edit it
+aws configure --profile ddos-eval
+
+./.venv/bin/python config.py  # prints the resolved configuration
+```
+
+`.env` holds only what differs between people and accounts: the AWS profile
+name, region, resource prefix and budget alert address. Credentials stay in
+`~/.aws/credentials` and never enter the repository.
+
+**Experiment parameters are deliberately NOT in `.env`.** The rate limit,
+evaluation window, Lambda memory and instance type are Terraform variables in
+`infra/*/main.tf`, under version control with their rationale beside them,
+because a published result must be traceable to the exact settings that
+produced it. Resource identifiers are not there either — distribution ids and
+web ACL ARNs are read live from Terraform outputs, since a cached identifier
+eventually goes stale and a collector then queries a resource that no longer
+exists, which returns an empty series rather than an error.
+
+So `.env` answers *whose account and where*; Terraform answers *what was the
+experiment*.
+
+```bash
+./scripts/infra.sh apply 00-core        # deploy, layer by layer
+./scripts/infra.sh status               # what is live
+./scripts/infra.sh destroy 00-core      # tear down
 ```
 
 ### Toolchain versions (verified 2026-09-22)

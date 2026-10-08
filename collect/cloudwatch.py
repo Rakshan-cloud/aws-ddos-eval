@@ -23,6 +23,11 @@ from pathlib import Path
 
 import boto3
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+import config
+
 REPO = Path(__file__).resolve().parents[1]
 
 LAYER_FOR = {"C3": "20-waf-managed", "C4": "30-waf-rate", "C5": "35-waf-antiddos"}
@@ -46,7 +51,7 @@ def tf_output(layer: str, key: str):
 def resolve_identifiers(manifest: dict) -> dict:
     cfg = manifest["configuration"]
     ids = {
-        "api_name": tf_output("00-core", "rest_api_id") and "ddos-eval-api",
+        "api_name": tf_output("00-core", "rest_api_id") and config.API_NAME,
         "web_acl": None,
         "distribution_id": None,
     }
@@ -88,10 +93,10 @@ def dimensions_for(ns: str, manifest: dict) -> list[dict] | None:
         return [{"Name": "WebACL", "Value": waf_name},
                 {"Name": "Rule", "Value": "ALL"}]
     if ns == "AWS/ApiGateway":
-        return [{"Name": "ApiName", "Value": manifest["_ids"].get("api_name") or "ddos-eval-api"},
-                {"Name": "Stage", "Value": "exp"}]
+        return [{"Name": "ApiName", "Value": manifest["_ids"].get("api_name") or config.API_NAME},
+                {"Name": "Stage", "Value": config.API_STAGE}]
     if ns == "AWS/Lambda":
-        return [{"Name": "FunctionName", "Value": "ddos-eval-target"}]
+        return [{"Name": "FunctionName", "Value": config.LAMBDA_FUNCTION}]
     if ns == "AWS/CloudFront":
         dist = manifest["_ids"].get("distribution_id")
         if not dist:
@@ -118,10 +123,10 @@ def fetch(manifest: dict, pad_seconds: int = 180) -> dict:
     q_end = end + dt.timedelta(seconds=pad_seconds)
 
     manifest = {**manifest, "_ids": resolve_identifiers(manifest)}
-    session = boto3.Session(profile_name="ddos-eval")
+    session = config.session()
     # WAF and CloudFront metrics for a CLOUDFRONT-scope ACL live in us-east-1.
-    regional = session.client("cloudwatch", region_name="eu-west-1")
-    global_cw = session.client("cloudwatch", region_name="us-east-1")
+    regional = session.client("cloudwatch", region_name=config.AWS_REGION)
+    global_cw = session.client("cloudwatch", region_name=config.AWS_GLOBAL_REGION)
 
     queries = {"eu-west-1": [], "us-east-1": []}
     for mid, ns, name, stat in SPECS:
