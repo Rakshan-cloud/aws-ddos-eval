@@ -87,14 +87,21 @@ def main():
     print("-" * 74)
     stem = parts[list(parts)[0]]["stem"]
     waf_file = RAW / f"{stem}.waflogs.json"
-    if waf_file.exists():
+    cfg_id = parts[list(parts)[0]]["manifest"]["configuration"]
+    if cfg_id in ("C1", "C2"):
+        # No web ACL exists in these configurations, so there are no WAF logs
+        # and nothing to compute a ratio from. M1 is zero by definition, not
+        # by measurement, and the distinction matters when reporting.
+        print("  source      : not applicable - no web ACL in this configuration")
+        print("  M1          : 0 by definition (nothing is evaluating requests)")
+    elif waf_file.exists():
         w = json.loads(waf_file.read_text())["summary"]
         print(f"  source      : WAF full logs (primary)")
-        print(f"  evaluated   : {w.get('evaluated')}")
-        print(f"  actions     : {w.get('actions')}")
-        print(f"  M1          : {w.get('blocked_ratio')}")
+        print(f"  evaluated   : {w.get('attacker_evaluated', w.get('evaluated'))} (attacker)")
+        print(f"  actions     : {w.get('attacker_actions', w.get('actions'))}")
+        print(f"  M1          : {w.get('M1_blocked_ratio', w.get('blocked_ratio'))}")
     else:
-        print("  WAF log file not collected yet — run collect/waf_logs.py first")
+        print("  WAF log file not collected yet - run collect/waf_logs.py first")
 
     # Client-side cross-check. These should agree with the WAF ratio; a large
     # divergence means requests are being answered by something other than the
@@ -151,11 +158,17 @@ def main():
         print(f"  p50         : {pct(lat, 50)} ms")
         print(f"  p95         : {pct(lat, 95)} ms   <- M4")
         print(f"  p99         : {pct(lat, 99)} ms")
-        base = REPO / "data" / "processed" / "baseline-c1.json"
+        base = REPO / "data" / "processed" / "baseline-ec2.json"
         if base.exists():
-            b = json.loads(base.read_text())["baseline_latency"]
-            print(f"  Week 2 laptop baseline p95 was {b['p95_ms']} ms — not comparable,")
-            print(f"  different vantage point. The EC2 baseline replaces it.")
+            b = json.loads(base.read_text())["latency"]
+            delta = pct(lat, 95) - b["p95_ms"]
+            print(f"  baseline    : {b['p95_ms']} ms (unloaded, C1, same host)")
+            print(f"  overhead    : {delta:+.1f} ms against baseline")
+            if delta < 0:
+                print("                negative - this configuration is FASTER than")
+                print("                hitting the origin directly, which is a result")
+                print("                rather than an error. CloudFront terminates TLS")
+                print("                at the edge, closer to the client.")
     else:
         print("  no successful legitimate requests to measure")
 
