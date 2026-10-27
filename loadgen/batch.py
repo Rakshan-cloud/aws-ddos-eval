@@ -22,6 +22,8 @@ import json
 import subprocess
 import sys
 import time
+
+import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +33,7 @@ import config  # noqa: E402
 
 RAW = REPO / "data" / "raw"
 SCHEDULE = REPO / "data" / "processed" / "run-schedule.json"
+SCENARIOS = REPO / "loadgen" / "scenarios.yaml"
 ANOMALIES = REPO / "data" / "processed" / "anomalies.jsonl"
 
 PY = str(REPO / ".venv" / "bin" / "python")
@@ -59,6 +62,21 @@ def completed_runs() -> dict[str, dict]:
         entry["complete"] = bool(att) or not needs_attacker
         done[run_id] = entry
     return done
+
+
+def expected_phases(scenario: str) -> dict[str, int]:
+    """What the attacker half of a scenario should contain, per phase.
+
+    The phase label is built by the runner as p<index>-r<rate> over every
+    phase in the spec, so a zero-rate lead-in occupies an index but emits
+    nothing and never appears in the records.
+    """
+    spec = yaml.safe_load(SCENARIOS.read_text())["scenarios"][scenario]
+    att = spec.get("attacker") or {}
+    if not att.get("enabled"):
+        return {}
+    return {f"p{i}-r{ph['rate']}": round(ph["rate"] * ph["duration_seconds"])
+            for i, ph in enumerate(att["phases"]) if ph["rate"] > 0}
 
 
 def integrity(run_id: str, entry: dict) -> list[str]:
@@ -92,6 +110,45 @@ def integrity(run_id: str, entry: dict) -> list[str]:
             problems.append(
                 f"start times differ: legit {legit['started_utc']} "
                 f"vs attacker {att['started_utc']}")
+
+        # Does the attacker half contain the scenario it claims to be?
+        #
+        # A run executed against a superseded scenario definition completes
+        # normally and reports a plausible ratio. C4-S2-R1 ran before the
+        # protocol freeze, when S2's tail was 0 req/s, so it emitted only the
+        # burst: 1800 requests instead of 2100. Nothing failed. M1 came back
+        # 0.8750 -- believable, and wrong by thirteen points, because the 300
+        # allowed tail requests were missing from the denominator rather than
+        # from the numerator.
+        #
+        # Checking the phase composition against scenarios.yaml is what
+        # distinguishes "this run finished" from "this run is the experiment
+        # the protocol specifies".
+        expect = expected_phases(legit["scenario"])
+        if expect:
+            arecs = entry["attacker"].with_name(
+                entry["attacker"].name.replace(".manifest.json", ".records.jsonl"))
+            if not arecs.exists():
+                problems.append("attacker records file missing")
+            else:
+                seen: dict[str, int] = {}
+                with arecs.open() as f:
+                    for line in f:
+                        if line.strip():
+                            ph = json.loads(line).get("phase", "")
+                            seen[ph] = seen.get(ph, 0) + 1
+                for label, want in expect.items():
+                    got = seen.get(label, 0)
+                    if got == 0:
+                        problems.append(
+                            f"phase {label} absent: expected {want} requests "
+                            f"(scenario definition has changed since this run)")
+                    elif abs(got - want) > max(2, want * 0.02):
+                        problems.append(
+                            f"phase {label} sent {got}, expected {want}")
+                for label in seen:
+                    if label not in expect:
+                        problems.append(f"unexpected phase {label} in records")
     elif legit["scenario"] != "S1":
         problems.append("attacker half missing")
 
@@ -146,6 +203,56 @@ def collect_one(run_id: str) -> None:
             continue
         subprocess.run([PY, "-m", mod, str(target[-1])],
                        cwd=REPO, capture_output=True, text=True)
+
+
+def teardown(sched: dict, current_cfg: str | None) -> None:
+    """Destroy billing resources once nothing more needs them.
+
+    Two triggers. The anti-DDoS rule group goes as soon as its own block is
+    finished, because it is the costly one and the rest of the matrix takes
+    hours. Everything else goes when the whole schedule is complete.
+    """
+    done = completed_runs()
+
+    def block_finished(cfg: str) -> bool:
+        return not [r for r in sched["runs"]
+                    if r["configuration"] == cfg
+                    and not (r["run_id"] in done and done[r["run_id"]]["complete"])]
+
+    layers = []
+    if current_cfg == "C5" and block_finished("C5"):
+        layers.append(("35-waf-antiddos", "anti-DDoS rule group ($0.0274/hour)"))
+
+    matrix_done = all(block_finished(c) for c in {r["configuration"] for r in sched["runs"]})
+    if matrix_done:
+        print("\n--- all 60 runs complete ---")
+        for layer, label in (("20-waf-managed", "managed rule groups"),
+                             ("30-waf-rate", "rate-based rule"),
+                             ("35-waf-antiddos", "anti-DDoS rule group")):
+            if (layer, label) not in layers:
+                layers.append((layer, label))
+
+    if not layers:
+        return
+
+    # Detach first. A web ACL attached to the distribution cannot be destroyed:
+    # AWS answers WAFAssociatedItemException, which is how C5 once survived a
+    # teardown attempt and billed overnight.
+    print("    detaching web ACL from the distribution...")
+    subprocess.run([PY, "switch/apply_config.py", "C2"],
+                   cwd=REPO, capture_output=True, text=True)
+
+    for layer, label in layers:
+        state = subprocess.run(["terraform", f"-chdir={REPO}/infra/{layer}",
+                                "state", "list"], capture_output=True, text=True)
+        if state.returncode != 0 or not state.stdout.strip():
+            continue
+        print(f"    destroying {label}...")
+        d = subprocess.run(["terraform", f"-chdir={REPO}/infra/{layer}",
+                            "destroy", "-input=false", "-auto-approve"],
+                           capture_output=True, text=True)
+        print("      destroyed" if d.returncode == 0
+              else f"      TEARDOWN FAILED - destroy it manually:\n{d.stderr[-300:]}")
 
 
 def main():
@@ -235,6 +342,14 @@ def main():
             print(f"    cool-down {a.cooldown}s "
                   f"(ends {datetime.fromtimestamp(time.time() + a.cooldown):%H:%M:%S})")
             time.sleep(a.cooldown)
+
+    # --- tear down whatever is still billing ------------------------------
+    # Every WAF layer bills monthly-prorated-hourly for as long as it exists,
+    # whether or not runs are happening. The anti-DDoS rule group is the
+    # expensive one at $0.0274/hour; left up after its block it cost $0.53 of
+    # unnecessary spend before anyone noticed. Teardown is therefore part of
+    # finishing, not a step to remember (risk R12).
+    teardown(sched, current_cfg)
 
     print(f"\n{executed} run(s) executed this session.")
     print("Re-run with --status to see overall progress.")

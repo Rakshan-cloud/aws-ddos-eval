@@ -30,3 +30,6 @@ data/raw/*
 
 # Terraform build artefacts
 **/.build/
+
+# Discarded runs are retained locally for the record, not published
+data/quarantine/

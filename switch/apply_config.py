@@ -152,8 +152,21 @@ def main():
     # rebuilding it takes minutes and its presence does not affect C1 traffic.
     if cfg == "C1":
         endpoint = tf_output("00-core", "api_invoke_url")
+
+        # Detach whatever web ACL is attached, even though C1 traffic bypasses
+        # CloudFront entirely. Leaving one attached blocks its Terraform
+        # destroy with WAFAssociatedItemException -- which is how the C5
+        # anti-DDoS rule group once stayed deployed overnight, billing at
+        # $0.0274/hour, after its block had finished.
+        if layer_deployed("10-cloudfront") and tf_output("10-cloudfront", "attached_web_acl", ""):
+            print("    detaching web ACL so it can be destroyed if needed...")
+            tf("10-cloudfront", "apply", "-input=false", "-auto-approve",
+               "-var=web_acl_arn=", f"-var=config_label={cfg}")
+            dist_id = tf_output("10-cloudfront", "distribution_id")
+            wait_deployed(session, dist_id)
+
         print(f"    endpoint     : {endpoint}")
-        print("    CloudFront and WAF are bypassed, not removed.")
+        print("    CloudFront is bypassed; no web ACL remains attached.")
         print("    NOTE: API Gateway throttling and Shield Standard remain active")
         print("          in C1 and are recorded as confounds (task T017).")
         write_state(cfg, endpoint, "")

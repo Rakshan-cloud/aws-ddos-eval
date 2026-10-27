@@ -64,7 +64,8 @@ def fetch_logs(cfg: str, start: dt.datetime, end: dt.datetime) -> list[dict]:
     return out
 
 
-def summarise(records: list[dict], attacker_ip: str | None = None) -> dict:
+def summarise(records: list[dict], attacker_ip: str | None = None,
+              window: tuple[float, float] | None = None) -> dict:
     """Reduce raw WAF records to the quantities M1 and the S4 breakdown need.
 
     M1 is defined as the share of FLOOD-CLASS requests blocked. Computing it
@@ -78,6 +79,7 @@ def summarise(records: list[dict], attacker_ip: str | None = None) -> dict:
     by_ip = Counter()
     actions_attacker = Counter()
     actions = Counter()
+    excluded_warmup = 0
     labels = Counter()
     terminating = Counter()
     by_uri = {}
@@ -87,6 +89,23 @@ def summarise(records: list[dict], attacker_ip: str | None = None) -> dict:
         actions[action] += 1
         ip = rec.get("httpRequest", {}).get("clientIp", "")
         by_ip[ip] += 1
+
+        # M1's denominator must be the MEASUREMENT WINDOW only.
+        #
+        # The log query is padded either side of the run so that scenario S2's
+        # release tail is captured. That padding also sweeps in the generator's
+        # warm-up requests, which are benign by design and correctly allowed.
+        # Counting them deflates M1: a C3-S4 run that blocked 600 of 600
+        # payloads reported 600/629 = 0.9539 because 29 warm-up requests sat in
+        # the denominator. The client-side records discard warm-up; the WAF log
+        # must do the same.
+        if window:
+            ts = rec.get("timestamp", 0) / 1000.0
+            if not (window[0] <= ts <= window[1]):
+                if attacker_ip and ip == attacker_ip:
+                    excluded_warmup += 1
+                continue
+
         if attacker_ip and ip == attacker_ip:
             actions_attacker[action] += 1
 
@@ -119,6 +138,7 @@ def summarise(records: list[dict], attacker_ip: str | None = None) -> dict:
         "attacker_evaluated": att_eval,
         "attacker_actions": dict(actions_attacker),
         "M1_blocked_ratio": round(att_blocked / att_eval, 4) if att_eval else None,
+        "attacker_outside_window": excluded_warmup,
         "by_client_ip": dict(by_ip.most_common()),
         "terminating_rules": dict(terminating.most_common()),
         "labels": dict(labels.most_common()),
@@ -179,14 +199,20 @@ def main():
         summary, join = {"evaluated": 0, "note": "no web ACL in this configuration"}, {}
     else:
         attacker_ip = manifest.get("source_ips", {}).get("attacker")
-        summary = summarise(waf, attacker_ip)
+        # Measurement window only, not the padded query window.
+        window = (start.timestamp(), end.timestamp())
+        summary = summarise(waf, attacker_ip, window)
         client_path = mpath.with_name(mpath.name.replace(".manifest.json", ".records.jsonl"))
         join = join_to_client(waf, client_path) if client_path.exists() else {}
 
         print(f"  evaluated     : {summary['evaluated']}  {summary['actions']}")
         print(f"  by client ip  : {summary['by_client_ip']}")
         print(f"  attacker ip   : {summary['attacker_ip']}")
-        print(f"  attacker      : {summary['attacker_evaluated']}  {summary['attacker_actions']}")
+        print(f"  attacker      : {summary['attacker_evaluated']} in window  "
+              f"{summary['attacker_actions']}")
+        if summary.get("attacker_outside_window"):
+            print(f"  excluded      : {summary['attacker_outside_window']} attacker requests "
+                  f"outside the measurement window (warm-up)")
         print(f"  M1 (attacker) : {summary['M1_blocked_ratio']}")
         print(f"  all traffic   : {summary['blocked_ratio_all_traffic']}  (different question)")
         if summary["terminating_rules"]:
