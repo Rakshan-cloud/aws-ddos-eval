@@ -188,14 +188,26 @@ def main():
     RAW = REPO / "data" / "raw"
     RAW.mkdir(parents=True, exist_ok=True)
     s3 = session.client("s3", region_name=config.AWS_REGION)
+
+    # THIS run's files only.
+    #
+    # Pulling the whole bucket on every run overwrites local files that are
+    # deliberately not there. C4-S2-R1 was withdrawn from the matrix for
+    # running against a superseded scenario definition; the next run's
+    # retrieval downloaded it again from the bucket and silently restored it
+    # to the analysis, where it re-entered the C4-S2 cell and skewed the
+    # median. Local curation has to survive the next retrieval.
+    run_id = f"{cfg['configuration']}-{a.scenario}-R{a.rep}"
     got = 0
-    for obj in s3.list_objects_v2(Bucket=bucket, Prefix="raw/").get("Contents", []):
+    for obj in s3.list_objects_v2(Bucket=bucket, Prefix=f"raw/{run_id}-").get("Contents", []):
         name = obj["Key"].split("/")[-1]
         if not name:
             continue
         s3.download_file(bucket, obj["Key"], str(RAW / name))
         got += 1
-    print(f"    {got} files -> {RAW.relative_to(REPO)}")
+    print(f"    {got} files -> {RAW.relative_to(REPO)}  ({run_id})")
+    if not got:
+        print("    WARNING: the hosts uploaded nothing for this run")
 
 
 if __name__ == "__main__":
