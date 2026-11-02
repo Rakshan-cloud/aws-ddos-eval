@@ -33,3 +33,6 @@ data/raw/*
 
 # Discarded runs are retained locally for the record, not published
 data/quarantine/
+
+# Figures regenerate from the analysis modules in seconds
+figures/
